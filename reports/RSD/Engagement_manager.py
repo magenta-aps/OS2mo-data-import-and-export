@@ -406,6 +406,10 @@ def main(*args, **kwargs):
         data.extend(extract_list_format_1(o, engagement_map))
         data_2.extend(extract_list_format_2(o, engagement_map))
 
+    # Sort data by unit name and path
+    for i in range(7, -1, -1):
+        data.sort(key=lambda _: _[i])
+        data_2.sort(key=lambda _: _[i])
 if __name__ == "__main__":
     logger.info("starting engagement_report")
     main()
