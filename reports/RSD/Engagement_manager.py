@@ -1,8 +1,13 @@
 """Generates a report for RSD containing information on org_units, managers and engagements"""
 
+from collections import defaultdict
+from datetime import date
+from typing import Iterator
 
 import click
 from fastramqpi.ra_utils.job_settings import JobSettings
+from more_itertools import first
+from more_itertools import one
 from reports.graphql import get_mo_client
 from reports.graphql import paginated_query
 from tools.log import LogLevel
@@ -109,6 +114,136 @@ query EngagementManagers($limit: int, $cursor: Cursor = null) {
 """
 
 
+def extract_ancestors(
+    ancestors: list[dict],
+) -> list[str]:
+    # Reverse ancestors list to start at root
+    ancestor_names = [a["name"] for a in ancestors[::-1]]
+    # Max level is 7 ancestors.
+    # Todo: consider a dynamic number of columns
+    ancestor_names = ancestor_names[:7]
+    # Append empty strings to conform to report schema of up to 7 ancestors
+    for _ in range(7 - len(ancestor_names)):
+        ancestor_names.append("")
+    return ancestor_names
+
+
+def find_managers_of_type(managers: list[dict], manager_type: str) -> list[dict]:
+    return [m for m in managers if m["manager_type"]["name"] == manager_type]
+
+
+def has_responsibility(manager: dict, responsibility_name: str) -> bool:
+    return any(r["name"] == responsibility_name for r in manager["responsibilities"])
+
+
+def find_manager_role_for_person(person: dict, managers: dict) -> dict | None:
+    return first(
+        (
+            e
+            for e in managers
+            if e["person"] and one(e["person"])["uuid"] == person["uuid"]
+        ),
+        default=None,
+    )
+
+
+def extract_manager(managers: list[dict]) -> list[str]:
+    """extract names of managers based on responsibility and return for the following:
+    * "Leder"
+    * "Medleder 1"
+    * "Medleder 2"
+    * "Administrator"
+    * "Administrativ ansvarlig"
+    * "Personaleledelse"
+    * "Uddannelsesansvarlig"
+    """
+
+    manager = first(find_managers_of_type(managers, "Leder"), default=None)
+    co_managers = find_managers_of_type(managers, "Medleder")
+    co_manager_1 = co_managers[0] if len(co_managers) > 0 else None
+    co_manager_2 = co_managers[1] if len(co_managers) > 1 else None
+    administrator = first(
+        find_managers_of_type(managers, "Administrator"), default=None
+    )
+    admin_responsibility = first(
+        (m for m in managers if has_responsibility(m, "Administrativ ansvarlig")),
+        default=None,
+    )
+    personel_management = first(
+        (m for m in managers if has_responsibility(m, "Personaleledelse")), default=None
+    )
+    udd = first(
+        (m for m in managers if has_responsibility(m, "Uddannelsesansvarlig")),
+        default=None,
+    )
+
+    def extract_manager_name(manager: dict | None) -> str:
+        if manager is None:
+            return ""
+        try:
+            return one(manager["person"])["name"]
+        except TypeError:
+            return ""
+
+    return [
+        extract_manager_name(manager),
+        extract_manager_name(co_manager_1),
+        extract_manager_name(co_manager_2),
+        extract_manager_name(administrator),
+        extract_manager_name(admin_responsibility),
+        extract_manager_name(personel_management),
+        extract_manager_name(udd),
+    ]
+
+
+def extract_list_format_1(org_unit: dict, engagement_map) -> Iterator:
+    """Extract relevant data from Graphql-response and return as a list of tuples"""
+    ancestors = extract_ancestors(org_unit["ancestors"])
+    # Add org_unit name as first ancestor if no ancestors
+    managers = extract_manager(org_unit["managers"])
+    if not ancestors[0]:
+        ancestors[0] = org_unit["name"]
+    for e in org_unit["engagements"]:
+        person = one(e["person"])
+        name = person["name"]
+
+        email = first(person["addresses"], default=None)
+        email = email["name"] if email else ""
+        job_function = f"{e['job_function']['name']} ({e['job_function']['user_key']})"
+        yield (
+            *ancestors,
+            org_unit["name"],
+            *managers,
+            e["user_key"],
+            e["user_key"][3:],
+            name,
+            email,
+            job_function,
+        )
+    engagement_persons = {one(e["person"])["uuid"] for e in org_unit["engagements"]}
+    manager_persons = {
+        one(m["person"])["uuid"] for m in org_unit["managers"] if m["person"]
+    }
+    managers_with_no_engagement_here = manager_persons - engagement_persons
+    for m in managers_with_no_engagement_here:
+        engagement = first(engagement_map[m], default=None)
+        if not engagement:
+            continue
+        person = one(engagement["person"])
+        email = first(person["addresses"], default=None)
+        email = email["name"] if email else ""
+        job_function = f"{engagement['job_function']['name']} ({engagement['job_function']['user_key']})"
+        yield (
+            *ancestors,
+            org_unit["name"],
+            *managers,
+            engagement["user_key"],
+            engagement["user_key"][3:],
+            one(engagement["person"])["name"],
+            email,
+            job_function,
+        )
+
 @click.command()
 @click.option("--mora_base", envvar="MORA_BASE", default="http://mo-service:5000")
 @click.option("--client-id", envvar="CLIENT_ID", default="dipex")
@@ -127,6 +262,20 @@ def main(*args, **kwargs):
         gql_version=22,
     )
     res = paginated_query(graphql_client=client, query=QUERY, page_size=10)
+    res = [r["current"] for r in res]
+    # Filter empty org_units
+    res = list(filter(lambda o: o["engagements"] or o["managers"], res))
+
+    # Create a map of all org_unit_uuids to the set of engagement and managers user_keys in each
+    engagement_map = defaultdict(list)
+
+    for o in res:
+        for e in o["engagements"]:
+            engagement_map[one(e["person"])["uuid"]].append(e)
+    # Extract data from graphql response
+    data = []
+    for o in res:
+        data.extend(extract_list_format_1(o, engagement_map))
     print(res)
 
 if __name__ == "__main__":
