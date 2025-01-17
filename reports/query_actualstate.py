@@ -50,8 +50,11 @@ class XLSXExporter:
     @staticmethod
     def get_column_width(data, field: int):
         data = filter(itemgetter(field), data)
-        field_length = max(len(row[field]) for row in data)
-        return field_length
+        try:
+            field_length = max(len(row[field]) for row in data)
+            return field_length
+        except IndexError:
+            return 10
 
     def add_sheet(self, workbook, sheet: str, data: list):
         worksheet = workbook.add_worksheet(name=sheet)

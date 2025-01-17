@@ -6,12 +6,17 @@ from datetime import date
 from typing import Iterator
 
 import click
+import xlsxwriter
 from dateutil.relativedelta import relativedelta
 from fastramqpi.ra_utils.job_settings import JobSettings
+from fastramqpi.raclients.upload import file_uploader
 from more_itertools import first
 from more_itertools import one
+from more_itertools import prepend
+
 from reports.graphql import get_mo_client
 from reports.graphql import paginated_query
+from reports.query_actualstate import XLSXExporter
 from tools.log import LogLevel
 from tools.log import get_logger
 from tools.log import setup_logging
@@ -410,6 +415,22 @@ def main(*args, **kwargs):
     for i in range(7, -1, -1):
         data.sort(key=lambda _: _[i])
         data_2.sort(key=lambda _: _[i])
+
+    logger.info("uploading files to MO reports")
+    with file_uploader(settings, "engagements_managers.xlsx") as filename:
+        # write data as excel file
+        workbook = xlsxwriter.Workbook(filename)
+        excel = XLSXExporter(filename)
+        excel.add_sheet(workbook, "Personer", list(prepend(HEADERS, data)))
+        workbook.close()
+    with file_uploader(settings, "engagements_managers_with_cpr.xlsx") as filename:
+        # write data as excel file
+        workbook = xlsxwriter.Workbook(filename)
+        excel = XLSXExporter(filename)
+        excel.add_sheet(workbook, "Personer", list(prepend(HEADERS_2, data_2)))
+        workbook.close()
+
+
 if __name__ == "__main__":
     logger.info("starting engagement_report")
     main()
